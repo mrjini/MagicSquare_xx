@@ -45,13 +45,26 @@
 - `34`, `16`, `4`, 빈 칸 `0`, 빈 칸 개수 `2` 등은 **단일 모듈**(예: `src/entity/magic_constant.py`)에서만 정의.
 - 비즈니스 코드에 **매직 리터럴 산재 금지** (`34`/`16` 직접 비교·루프 상한 등).
 
+## Git · PR (업로드 시)
+- **기본:** 작업 브랜치(`spec` 또는 `feature/*`)에만 commit · push.
+- **금지:** `main` / `staging`에 **로컬 merge 후 push** (리뷰 생략 업로드).
+- **업로드 절차:**
+  1. feature 브랜치 push
+  2. **PR 생성** → `base: main` (필요 시 `staging`용 PR 별도)
+  3. 사용자 리뷰·승인 후 GitHub에서 merge
+- PR 생성: `gh pr create` 가능 시 사용; 없으면 compare URL 안내  
+  `https://github.com/mrjini/MagicSquare_xx/compare/main...<branch>`
+- **예외:** 사용자가 “main에 직접 merge”를 명시한 경우만 로컬 merge 허용.
+
 ## AI 행동
 - **한국어**로 응답.
 - TDD 작업 시 매 턴 선언: **Phase** (RED|GREEN|REFACTOR), **Layer** (entity|control|boundary), **Track** (Logic|UI).
 - 범위 최소화: 요청·Phase에 맞는 레이어만 수정.
-- **git commit / push는 사용자가 요청할 때만** 실행.
+- **git commit / push / PR은 사용자가 요청할 때만** 실행.
+- GitHub 업로드 요청 시 **PR 먼저**, 자동 merge 금지 (위 Git · PR 절차).
 - 표면 솔루션(GUI·Solver·AI 힌트) 제안은 Mom Test Out of Scope — 판정·10선·실패 조건 우선.
 
 ## 금지 (요약)
 - entity에서 E001~E005 처리, entity→상위 import, Logic Track Domain Mock.
 - assert 약화, skip, xfail, 34/16 리터럴 산재, 사용자 미요청 git commit.
+- 리뷰 없이 `main`/`staging`에 fast-forward merge · push.
