@@ -1,0 +1,18 @@
+[project]
+name = "magic-square-1004"
+version = "0.1.0"
+description = "MagicSquare_1004 — ECB + Dual-Track TDD (Session 3 harness)"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "entity: Entity layer (Dual-Track)",
+    "control: Control layer (Dual-Track)",
+    "boundary: Boundary layer (Dual-Track)",
+]
