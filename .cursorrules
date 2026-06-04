@@ -1,0 +1,57 @@
+# MagicSquare_1004 — Cursor Rules (초안)
+
+## 프로젝트
+4×4 **부분 마방진** ECB 실습. Mom Test·PRD(`docs/PRD.md`)·Report(`Report/`) 준수.
+
+## 도메인
+- 격자 4×4, 값 1~16, **빈 칸 `0` 정확히 2개**, 마방진 상수 **34** (10선: 행4+열4+대각2).
+- 정상 출력: `int[6]` → `[r1, c1, n1, r2, c2, n2]` — **좌표 1-index** (행·열 1~4).
+- 오류 코드 **E001~E007**는 **boundary**에서만 매핑·표시.
+- **entity**는 **E001~E005 처리 금지** (도메인 규칙만; 경계 오류는 boundary/control 위임).
+
+| 코드 | 요지 (boundary) |
+|------|------------------|
+| E001 | 합 ≠ 34 (10선) |
+| E002 | 값 범위 위반 (1~16) |
+| E003 | 중복 |
+| E004 | 빈 칸 수 ≠ 2 |
+| E005 | 대각선 불일치 |
+| E006 | 입력 형식/파싱 |
+| E007 | 기타 boundary |
+
+## 아키텍처 (ECB)
+- 의존 방향: **boundary → control → entity** (단방향).
+- **entity**는 `control`·`boundary`·상위 패키지 **import 금지**.
+- **control**: 검증·오케스트레이션 (`SquareValidator` 등). entity 호출만.
+- **boundary**: 입출력, E001~E007 사용자 메시지.
+
+### Dual-Track
+| Track | 레이어 | Mock |
+|-------|--------|------|
+| **Logic** | entity, control | **Domain Mock 금지** — 실제 규칙·격자 |
+| **UI** | boundary | **Mock 허용** (입력 핸들러·표시 스텁) |
+
+### 테스트 ID·파일명
+- Logic: ID **`D-*`**, 파일 `tests/**/test_d_*.py`, `@pytest.mark.control` / `entity` 등 레이어 마커 병행 가능.
+- UI: ID **`U-*`**, 파일 `tests/**/test_u_*.py`, `@pytest.mark.boundary`.
+- 한 테스트에 Logic+UI 혼합 금지 (Dual-Track 분리).
+
+## TDD
+- **RED → GREEN → REFACTOR**만. 단계 건너뛰기·구현 선행 금지.
+- **assert 완화·`pytest.skip`·`xfail` 금지** (실패는 실패로 유지).
+- 리팩터는 GREEN 유지하며 구조만 변경.
+
+## MagicConstant (SSOT)
+- `34`, `16`, `4`, 빈 칸 `0`, 빈 칸 개수 `2` 등은 **단일 모듈**(예: `src/entity/magic_constant.py`)에서만 정의.
+- 비즈니스 코드에 **매직 리터럴 산재 금지** (`34`/`16` 직접 비교·루프 상한 등).
+
+## AI 행동
+- **한국어**로 응답.
+- TDD 작업 시 매 턴 선언: **Phase** (RED|GREEN|REFACTOR), **Layer** (entity|control|boundary), **Track** (Logic|UI).
+- 범위 최소화: 요청·Phase에 맞는 레이어만 수정.
+- **git commit / push는 사용자가 요청할 때만** 실행.
+- 표면 솔루션(GUI·Solver·AI 힌트) 제안은 Mom Test Out of Scope — 판정·10선·실패 조건 우선.
+
+## 금지 (요약)
+- entity에서 E001~E005 처리, entity→상위 import, Logic Track Domain Mock.
+- assert 약화, skip, xfail, 34/16 리터럴 산재, 사용자 미요청 git commit.
