@@ -10,16 +10,52 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot\..
 
-$ghDir = "C:\Program Files\GitHub CLI"
-if ((Test-Path "$ghDir\gh.exe") -and ($env:Path -notlike "*GitHub CLI*")) {
-    $env:Path = "$ghDir;$env:Path"
+function Resolve-Gh {
+    $cmd = Get-Command gh -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+
+    $candidates = @(
+        "C:\Program Files\GitHub CLI\gh.exe",
+        "$env:ProgramFiles\GitHub CLI\gh.exe",
+        "$env:LocalAppData\Programs\GitHub CLI\gh.exe"
+    )
+    foreach ($path in $candidates) {
+        if (Test-Path $path) { return $path }
+    }
+    return $null
 }
 
-if (-not $Head) {
-    $Head = git branch --show-current 2>$null
+function Get-RepoOwner([string]$repo) {
+    return ($repo -split "/", 2)[0]
 }
-if (-not $Head) {
-    Write-Error "Cannot detect current branch. Pass -Head."
+
+function Get-ApiHeadRef([string]$repo, [string]$branch) {
+    return "$(Get-RepoOwner $repo):$branch"
+}
+
+function Invoke-Gh {
+    param(
+        [string]$GhExe,
+        [string[]]$GhArgs,
+        [switch]$AllowFailure
+    )
+    $output = & $GhExe @GhArgs 2>&1
+    if (-not $AllowFailure -and $LASTEXITCODE -ne 0) {
+        $detail = ($output | Out-String).Trim()
+        if ($detail) {
+            throw $detail
+        }
+        throw "gh exited with code $LASTEXITCODE"
+    }
+    return $output
+}
+
+function Test-NoDiffMessage([string]$message) {
+    return ($message -match "No commits between|nothing to compare|no commits")
+}
+
+function Test-AlreadyExistsMessage([string]$message) {
+    return ($message -match "already exists|A pull request already exists")
 }
 
 function Get-ParentBranch([string]$branch) {
@@ -31,13 +67,142 @@ function Get-ParentBranch([string]$branch) {
     }
 }
 
+function Find-ExistingPrGh {
+    param([string]$GhExe, [string]$repo, [string]$base, [string]$branch)
+    $json = Invoke-Gh -GhExe $GhExe -GhArgs @(
+        "pr", "list",
+        "--repo", $repo,
+        "--base", $base,
+        "--head", $branch,
+        "--state", "open",
+        "--json", "url,number"
+    )
+    if (-not $json) { return $null }
+    $items = @($json | ConvertFrom-Json)
+    if ($items.Count -gt 0) { return $items[0] }
+    return $null
+}
+
+function Find-ExistingPrApi {
+    param([string]$repo, [string]$base, [string]$branch)
+    $token = $env:GITHUB_TOKEN
+    if (-not $token) { return $null }
+
+    $headRef = Get-ApiHeadRef -repo $repo -branch $branch
+    $uri = "https://api.github.com/repos/$repo/pulls?state=open&base=$base&head=$([uri]::EscapeDataString($headRef))"
+    $headers = @{
+        Authorization          = "Bearer $token"
+        Accept                 = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+    try {
+        $items = @(Invoke-RestMethod -Method Get -Uri $uri -Headers $headers)
+        if ($items.Count -gt 0) {
+            return @{ url = $items[0].html_url; number = $items[0].number }
+        }
+    }
+    catch {
+        Write-Verbose "[create_pr] Existing PR API lookup failed: $_"
+    }
+    return $null
+}
+
+function Find-ExistingPr {
+    param([string]$GhExe, [string]$repo, [string]$base, [string]$branch)
+    if ($GhExe) {
+        try {
+            $found = Find-ExistingPrGh -GhExe $GhExe -repo $repo -base $base -branch $branch
+            if ($found) { return $found }
+        }
+        catch {
+            Write-Verbose "[create_pr] Existing PR gh lookup failed: $_"
+        }
+    }
+    return Find-ExistingPrApi -repo $repo -base $base -branch $branch
+}
+
+function New-PrGh {
+    param([string]$GhExe, [string]$repo, [string]$base, [string]$branch, [string]$title, [string]$bodyText)
+    try {
+        Invoke-Gh -GhExe $GhExe -GhArgs @(
+            "pr", "create",
+            "--repo", $repo,
+            "--base", $base,
+            "--head", $branch,
+            "--title", $title,
+            "--body", $bodyText
+        ) | Out-Null
+    }
+    catch {
+        if (Test-AlreadyExistsMessage "$_") {
+            $existing = Find-ExistingPrGh -GhExe $GhExe -repo $repo -base $base -branch $branch
+            if ($existing) { return "$($existing.url)".Trim() }
+        }
+        if (Test-NoDiffMessage "$_") {
+            throw "NO_DIFF: $_"
+        }
+        throw
+    }
+
+    $existing = Find-ExistingPrGh -GhExe $GhExe -repo $repo -base $base -branch $branch
+    if (-not $existing) { throw "PR create finished but open PR was not found" }
+    return "$($existing.url)".Trim()
+}
+
+function New-PrApi {
+    param([string]$repo, [string]$base, [string]$branch, [string]$title, [string]$bodyText)
+    $token = $env:GITHUB_TOKEN
+    if (-not $token) { throw "GITHUB_TOKEN not set" }
+
+    $uri = "https://api.github.com/repos/$repo/pulls"
+    $payload = @{
+        title = $title
+        head  = $branch
+        base  = $base
+        body  = $bodyText
+    } | ConvertTo-Json -Compress
+    $headers = @{
+        Authorization          = "Bearer $token"
+        Accept                 = "application/vnd.github+json"
+        "X-GitHub-Api-Version" = "2022-11-28"
+    }
+    try {
+        $resp = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -Body $payload -ContentType "application/json; charset=utf-8"
+        return $resp.html_url
+    }
+    catch {
+        if (Test-AlreadyExistsMessage "$_") {
+            $existing = Find-ExistingPrApi -repo $repo -base $base -branch $branch
+            if ($existing) { return $existing.url }
+        }
+        if (Test-NoDiffMessage "$_") {
+            throw "NO_DIFF: $_"
+        }
+        throw
+    }
+}
+
+$GhExe = Resolve-Gh
+if ($GhExe) {
+    $ghDir = Split-Path $GhExe -Parent
+    if ($env:Path -notlike "*$ghDir*") {
+        $env:Path = "$ghDir;$env:Path"
+    }
+}
+
+if (-not $Head) {
+    $Head = git branch --show-current 2>$null
+}
+if (-not $Head) {
+    Write-Error "Cannot detect current branch. Pass -Head."
+}
+
 $Base = Get-ParentBranch $Head
 if (-not $Base) {
     Write-Host "[create_pr] Branch '$Head' is root (main). No PR created."
     exit 0
 }
 
-$owner, $repoName = $Repo -split "/", 2
 $compareUrl = "https://github.com/$Repo/compare/${Base}...${Head}?expand=1"
 
 if (-not $Title) {
@@ -56,81 +221,57 @@ if (-not $Body) {
 "@
 }
 
-function Test-ExistingPrGh {
-    param([string]$b, [string]$h)
-    $gh = Get-Command gh -ErrorAction SilentlyContinue
-    if (-not $gh) { return $null }
-    $json = gh pr list --repo $Repo --base $b --head $h --state open --json url,number 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
-    $arr = $json | ConvertFrom-Json
-    if ($arr.Count -gt 0) { return $arr[0] }
-    return $null
-}
-
-function New-PrGh {
-    param([string]$b, [string]$h, [string]$t, [string]$bd)
-    $args = @(
-        "pr", "create",
-        "--repo", $Repo,
-        "--base", $b,
-        "--head", $h,
-        "--title", $t,
-        "--body", $bd
-    )
-    & gh @args 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "gh pr create failed (exit $LASTEXITCODE)" }
-}
-
-function New-PrApi {
-    param([string]$b, [string]$h, [string]$t, [string]$bd)
-    $token = $env:GITHUB_TOKEN
-    if (-not $token) { throw "GITHUB_TOKEN not set" }
-    $uri = "https://api.github.com/repos/$Repo/pulls"
-    $payload = @{
-        title = $t
-        head  = $h
-        base  = $b
-        body  = $bd
-    } | ConvertTo-Json
-    $headers = @{
-        Authorization = "Bearer $token"
-        Accept        = "application/vnd.github+json"
-        "X-GitHub-Api-Version" = "2022-11-28"
-    }
-    $resp = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -Body $payload -ContentType "application/json"
-    return $resp.html_url
-}
-
 Write-Host "[create_pr] Head=$Head Parent(base)=$Base"
 
-$existing = Test-ExistingPrGh -b $Base -h $Head
+$existing = Find-ExistingPr -GhExe $GhExe -repo $Repo -base $Base -branch $Head
 if ($existing) {
     Write-Host "[create_pr] Open PR already exists: $($existing.url) (#$($existing.number))"
     Write-Host "PR_URL=$($existing.url)"
     exit 0
 }
 
-try {
-    if (Get-Command gh -ErrorAction SilentlyContinue) {
-        $out = New-PrGh -b $Base -h $Head -t $Title -bd $Body
-        $url = ($out | Select-String -Pattern 'https://github.com/\S+/pull/\d+' | ForEach-Object { $_.Matches.Value }) | Select-Object -First 1
-        if (-not $url) { $url = (gh pr view --repo $Repo --json url -q .url 2>$null) }
+$failures = @()
+
+if ($GhExe) {
+    try {
+        $url = New-PrGh -GhExe $GhExe -repo $Repo -base $Base -branch $Head -title $Title -bodyText $Body
         Write-Host "[create_pr] Created via gh: $url"
         Write-Host "PR_URL=$url"
         exit 0
     }
-    if ($env:GITHUB_TOKEN) {
-        $url = New-PrApi -b $Base -h $Head -t $Title -bd $Body
+    catch {
+        if ("$_" -match "^NO_DIFF:") {
+            Write-Host "[create_pr] No commits between '$Base' and '$Head'. Nothing to PR."
+            exit 0
+        }
+        $failures += "gh: $_"
+    }
+}
+
+if ($env:GITHUB_TOKEN) {
+    try {
+        $url = New-PrApi -repo $Repo -base $Base -branch $Head -title $Title -bodyText $Body
         Write-Host "[create_pr] Created via API: $url"
         Write-Host "PR_URL=$url"
         exit 0
     }
-}
-catch {
-    Write-Warning "[create_pr] Auto-create failed: $_"
+    catch {
+        if ("$_" -match "^NO_DIFF:") {
+            Write-Host "[create_pr] No commits between '$Base' and '$Head'. Nothing to PR."
+            exit 0
+        }
+        $failures += "API: $_"
+    }
 }
 
-Write-Host "[create_pr] gh CLI and GITHUB_TOKEN unavailable. Open compare URL manually:"
+if ($failures.Count -gt 0) {
+    Write-Warning "[create_pr] Auto-create failed: $($failures -join '; ')"
+}
+elseif (-not $GhExe -and -not $env:GITHUB_TOKEN) {
+    Write-Warning "[create_pr] gh CLI not found and GITHUB_TOKEN is not set."
+}
+
+Write-Host "[create_pr] Open compare URL manually:"
 Write-Host "COMPARE_URL=$compareUrl"
 Write-Host ""
 Write-Host "Install: winget install GitHub.cli"
